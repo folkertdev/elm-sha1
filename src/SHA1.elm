@@ -56,8 +56,6 @@ import Bytes exposing (Bytes, Endianness(..))
 import Bytes.Decode as Decode exposing (Decoder, Step(..))
 import Bytes.Encode as Encode
 import Hex
-import List.Extra exposing (groupsOf, indexedFoldl)
-import String.UTF8 as UTF8
 
 
 
@@ -88,6 +86,18 @@ type alias DeltaState =
     , d : Int
     , e : Int
     }
+
+
+
+-- CONSTANTS
+
+
+blockSize =
+    64
+
+
+numberOfWords =
+    16
 
 
 
@@ -148,7 +158,7 @@ hashBytesValue bytes =
                     ]
                 )
 
-        looper ( n, state ) =
+        decodeChunk ( n, state ) =
             if n > 0 then
                 reduceBytesMessage state
                     |> Decode.map (\new -> Loop ( n - 1, new ))
@@ -156,15 +166,19 @@ hashBytesValue bytes =
             else
                 Decode.succeed (Done state)
 
+        numberOfChunks =
+            Bytes.width message // 64
+
         hashState =
-            Decode.loop ( Bytes.width message // 64, init ) looper
+            Decode.loop ( numberOfChunks, init ) decodeChunk
     in
     case Decode.decode hashState message of
-        Nothing ->
-            finalDigest init
-
         Just digest ->
             finalDigest digest
+
+        Nothing ->
+            -- impossible case
+            finalDigest init
 
 
 finalDigest : State -> Digest
@@ -173,40 +187,36 @@ finalDigest { h0, h1, h2, h3, h4 } =
 
 
 reduceBytesMessage : State -> Decoder State
-reduceBytesMessage { h0, h1, h2, h3, h4 } =
-    let
-        initialDeltas =
-            DeltaState h0 h1 h2 h3 h4
-
-        numberOfWords =
-            -- 64 // 4
-            16
-
-        helper : Array Int -> State
-        helper words =
-            let
-                { a, b, c, d, e } =
-                    accumulateDeltas 0 words (arrayIndexedFoldl calculateDigestDeltas initialDeltas words)
-            in
-            State (trim (h0 + a)) (trim (h1 + b)) (trim (h2 + c)) (trim (h3 + d)) (trim (h4 + e))
-    in
+reduceBytesMessage state =
     array numberOfWords (Decode.unsignedInt32 BE)
-        |> Decode.map helper
+        |> Decode.map (addDeltas state)
+
+
+addDeltas : State -> Array Int -> State
+addDeltas state words =
+    let
+        { h0, h1, h2, h3, h4 } =
+            state
+
+        initialDeltaState =
+            arrayIndexedFoldl calculateDigestDeltas (DeltaState h0 h1 h2 h3 h4) words
+
+        { a, b, c, d, e } =
+            accumulateDeltas 0 words initialDeltaState
+    in
+    State (trim (h0 + a)) (trim (h1 + b)) (trim (h2 + c)) (trim (h3 + d)) (trim (h4 + e))
 
 
 accumulateDeltas : Int -> Array Int -> DeltaState -> DeltaState
 accumulateDeltas i state deltaState =
-    -- magic constants:
-    -- 64; size of a block
-    -- 16 = 64//4; number of words
-    if i < 64 then
+    if i < blockSize then
         let
             newElement =
-                reduceWords (i + 16) state
+                reduceWords (i + numberOfWords) state
         in
         accumulateDeltas (i + 1)
             (Array.push newElement state)
-            (calculateDigestDeltas (i + 16) newElement deltaState)
+            (calculateDigestDeltas (i + numberOfWords) newElement deltaState)
 
     else
         deltaState
@@ -269,21 +279,6 @@ reduceWords index words =
 rotateLeftBy : Int -> Int -> Int
 rotateLeftBy amount i =
     trim <| shiftRightZfBy (32 - amount) i + trim (shiftLeftBy amount i)
-
-
-wordFromInts : List Int -> Int
-wordFromInts ints =
-    case ints of
-        a :: b :: c :: d :: [] ->
-            List.foldl or
-                d
-                [ shiftLeftBy 0x08 c
-                , shiftLeftBy 0x10 b
-                , shiftLeftBy 0x18 a
-                ]
-
-        _ ->
-            0
 
 
 init : State
