@@ -1,5 +1,6 @@
 module Tests exposing (suite)
 
+import Bytes.Encode as Encode
 import Expect exposing (Expectation)
 import Fuzz exposing (Fuzzer)
 import Hex
@@ -21,12 +22,13 @@ type Input
 
 suite : Test
 suite =
-    fromWikipedia
+    (fromWikipedia
         ++ unicode
         ++ fromDevRandom
         ++ fromBytes
         ++ weirdBytes
         |> List.map makeTest
+    )
         |> describe "SHA-1"
 
 
@@ -70,13 +72,13 @@ weirdBytes =
 makeTest : TestCase -> Test
 makeTest (TestCase input hex base64) =
     let
-        ( description, digest ) =
+        ( description, digest, encoder ) =
             case input of
                 FromString str ->
-                    ( "String: " ++ str, SHA1.fromString str )
+                    ( "String: " ++ str, SHA1.fromString str, Encode.string str )
 
                 FromBytes bytes ->
-                    ( String.fromInt (List.length bytes) ++ " bytes", SHA1.fromBytes bytes )
+                    ( String.fromInt (List.length bytes) ++ " bytes", SHA1.fromBytes bytes, Encode.sequence (List.map Encode.unsignedInt8 bytes) )
     in
     describe description
         [ test "Hex representation" <|
@@ -88,5 +90,12 @@ makeTest (TestCase input hex base64) =
                 SHA1.toBytes digest
                     |> List.map (Hex.toString >> String.padLeft 2 '0')
                     |> String.concat
+                    |> Expect.equal hex
+        , test "using `Bytes`" <|
+            \_ ->
+                encoder
+                    |> Encode.encode
+                    |> SHA1.hashBytesValue
+                    |> SHA1.toHex
                     |> Expect.equal hex
         ]

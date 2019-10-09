@@ -3,6 +3,7 @@ module SHA1 exposing
     , fromString
     , toHex, toBase64
     , fromBytes, toBytes
+    , hashBytesValue
     )
 
 {-| [SHA-1] is a [cryptographic hash function].
@@ -44,12 +45,16 @@ hashing [elm/bytes], [let me know][issues]!
 
 # Binary data
 
+@docs fromByteValues, toByteValues
 @docs fromBytes, toBytes
 
 -}
 
 import Array exposing (Array)
 import Bitwise exposing (and, complement, or, shiftLeftBy, shiftRightZfBy)
+import Bytes exposing (Bytes, Endianness(..))
+import Bytes.Decode as Decode exposing (Decoder, Step(..))
+import Bytes.Encode as Encode
 import Hex
 import List.Extra exposing (groupsOf, indexedFoldl)
 import String.UTF8 as UTF8
@@ -96,8 +101,8 @@ type alias DeltaState =
 
 -}
 fromString : String -> Digest
-fromString =
-    UTF8.toBytes >> hashBytes
+fromString input =
+    hashBytesValue (Encode.encode (Encode.string input))
 
 
 {-| Sometimes you have binary data that's not representable in a string. Create
@@ -113,22 +118,14 @@ and 255 are discarded.
 -}
 fromBytes : List Int -> Digest
 fromBytes =
-    List.filter (\i -> i >= 0 && i <= 255) >> hashBytes
+    hashBytesValue << Encode.encode << Encode.sequence << List.map Encode.unsignedInt8
 
 
-hashBytes : List Int -> Digest
-hashBytes bytes =
+hashBytesValue : Bytes -> Digest
+hashBytesValue bytes =
     let
         byteCount =
-            List.length bytes
-
-        -- The 3s are to convert byte count to bit count (2^3 = 8)
-        bitCountInBytes =
-            [ byteCount |> shiftRightZfBy (0x18 - 3) |> and 0xFF
-            , byteCount |> shiftRightZfBy (0x10 - 3) |> and 0xFF
-            , byteCount |> shiftRightZfBy (0x08 - 3) |> and 0xFF
-            , byteCount |> shiftLeftBy 3 |> and 0xFF
-            ]
+            Bytes.width bytes
 
         -- The full message (message + 1 byte for message end flag (0x80) + 8 bytes for message length)
         -- has to be a multiple of 64 bytes (i.e. of 512 bits).
@@ -136,19 +133,38 @@ hashBytes bytes =
         zeroBytesToAppend =
             4 + modBy 64 (56 - modBy 64 (byteCount + 1))
 
-        bytesToAppend =
-            0x80 :: List.repeat zeroBytesToAppend 0x00 ++ bitCountInBytes
-
         message =
-            bytes ++ bytesToAppend
+            Encode.encode
+                (Encode.sequence
+                    [ Encode.bytes bytes
+                    , Encode.unsignedInt8 0x80
+                    , Encode.sequence (List.repeat zeroBytesToAppend (Encode.unsignedInt8 0))
 
-        chunks =
-            groupsOf 64 message
+                    -- The 3s are to convert byte count to bit count (2^3 = 8)
+                    , byteCount |> shiftRightZfBy (0x18 - 3) |> and 0xFF |> Encode.unsignedInt8
+                    , byteCount |> shiftRightZfBy (0x10 - 3) |> and 0xFF |> Encode.unsignedInt8
+                    , byteCount |> shiftRightZfBy (0x08 - 3) |> and 0xFF |> Encode.unsignedInt8
+                    , byteCount |> shiftLeftBy 3 |> and 0xFF |> Encode.unsignedInt8
+                    ]
+                )
+
+        looper ( n, state ) =
+            if n > 0 then
+                reduceBytesMessage state
+                    |> Decode.map (\new -> Loop ( n - 1, new ))
+
+            else
+                Decode.succeed (Done state)
 
         hashState =
-            List.foldl reduceMessage init chunks
+            Decode.loop ( Bytes.width message // 64, init ) looper
     in
-    finalDigest hashState
+    case Decode.decode hashState message of
+        Nothing ->
+            finalDigest init
+
+        Just digest ->
+            finalDigest digest
 
 
 finalDigest : State -> Digest
@@ -156,25 +172,44 @@ finalDigest { h0, h1, h2, h3, h4 } =
     Digest h0 h1 h2 h3 h4
 
 
-reduceMessage : List Int -> State -> State
-reduceMessage chunk { h0, h1, h2, h3, h4 } =
+reduceBytesMessage : State -> Decoder State
+reduceBytesMessage { h0, h1, h2, h3, h4 } =
     let
-        words =
-            chunk
-                |> groupsOf 4
-                |> List.map wordFromInts
-                |> Array.fromList
-
         initialDeltas =
             DeltaState h0 h1 h2 h3 h4
 
-        { a, b, c, d, e } =
-            List.Extra.initialize 64 ((+) 16)
-                |> List.foldl reduceWords words
-                |> Array.toList
-                |> indexedFoldl calculateDigestDeltas initialDeltas
+        numberOfWords =
+            -- 64 // 4
+            16
+
+        helper : Array Int -> State
+        helper words =
+            let
+                { a, b, c, d, e } =
+                    accumulateDeltas 0 words (arrayIndexedFoldl calculateDigestDeltas initialDeltas words)
+            in
+            State (trim (h0 + a)) (trim (h1 + b)) (trim (h2 + c)) (trim (h3 + d)) (trim (h4 + e))
     in
-    State (trim (h0 + a)) (trim (h1 + b)) (trim (h2 + c)) (trim (h3 + d)) (trim (h4 + e))
+    array numberOfWords (Decode.unsignedInt32 BE)
+        |> Decode.map helper
+
+
+accumulateDeltas : Int -> Array Int -> DeltaState -> DeltaState
+accumulateDeltas i state deltaState =
+    -- magic constants:
+    -- 64; size of a block
+    -- 16 = 64//4; number of words
+    if i < 64 then
+        let
+            newElement =
+                reduceWords (i + 16) state
+        in
+        accumulateDeltas (i + 1)
+            (Array.push newElement state)
+            (calculateDigestDeltas (i + 16) newElement deltaState)
+
+    else
+        deltaState
 
 
 calculateDigestDeltas : Int -> Int -> DeltaState -> DeltaState
@@ -214,19 +249,21 @@ trim =
     and 0xFFFFFFFF
 
 
-reduceWords : Int -> Array Int -> Array Int
+reduceWords : Int -> Array Int -> Int
 reduceWords index words =
     let
-        v i =
+        get i =
             Array.get (index - i) words
+                |> Maybe.withDefault 0
 
         val =
-            [ v 3, v 8, v 14, v 16 ]
-                |> List.filterMap identity
-                |> List.foldl Bitwise.xor 0
+            get 3
+                |> Bitwise.xor (get 8)
+                |> Bitwise.xor (get 14)
+                |> Bitwise.xor (get 16)
                 |> rotateLeftBy 1
     in
-    Array.push val words
+    val
 
 
 rotateLeftBy : Int -> Int -> Int
@@ -298,9 +335,7 @@ hexadecimal digits.
 -}
 toHex : Digest -> String
 toHex (Digest a b c d e) =
-    [ a, b, c, d, e ]
-        |> List.map wordToHex
-        |> String.concat
+    wordToHex a ++ wordToHex b ++ wordToHex c ++ wordToHex d ++ wordToHex e
 
 
 wordToHex : Int -> String
@@ -371,3 +406,31 @@ base64Chars =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
         |> String.toList
         |> Array.fromList
+
+
+
+-- HELPERS
+
+
+array : Int -> Decoder a -> Decoder (Array a)
+array n decoder =
+    Decode.loop ( n, Array.empty ) (arrayHelp decoder)
+
+
+arrayHelp decoder ( i, accum ) =
+    if i > 0 then
+        decoder
+            |> Decode.map (\newValue -> Loop ( i - 1, Array.push newValue accum ))
+
+    else
+        Decode.succeed (Done accum)
+
+
+arrayIndexedFoldl : (Int -> a -> b -> b) -> b -> Array a -> b
+arrayIndexedFoldl step initial arr =
+    let
+        folder element ( i, state ) =
+            ( i + 1, step i element state )
+    in
+    Array.foldl folder ( 0, initial ) arr
+        |> Tuple.second
