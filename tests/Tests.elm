@@ -22,14 +22,28 @@ type Input
 
 suite : Test
 suite =
-    (fromWikipedia
-        ++ unicode
-        ++ fromDevRandom
-        ++ fromBytes
-        ++ weirdBytes
-        |> List.map makeTest
-    )
-        |> describe "SHA-1"
+    if True then
+        (fromWikipedia
+            ++ unicode
+            ++ fromDevRandom
+            ++ fromBytes
+            ++ weirdBytes
+            |> List.map makeTest
+        )
+            |> describe "SHA-1"
+
+    else
+        foo
+
+
+foo =
+    test "using `Bytes`" <|
+        \_ ->
+            Encode.string "The quick brown fox jumps over the lazy dog"
+                |> Encode.encode
+                |> SHA1.fromBytes
+                |> SHA1.toHex
+                |> Expect.equal "foo"
 
 
 fromWikipedia : List TestCase
@@ -78,7 +92,7 @@ makeTest (TestCase input hex base64) =
                     ( "String: " ++ str, SHA1.fromString str, Encode.string str )
 
                 FromBytes bytes ->
-                    ( String.fromInt (List.length bytes) ++ " bytes", SHA1.fromBytes bytes, Encode.sequence (List.map Encode.unsignedInt8 bytes) )
+                    ( String.fromInt (List.length bytes) ++ " bytes", SHA1.fromByteValues bytes, Encode.sequence (List.map Encode.unsignedInt8 bytes) )
     in
     describe description
         [ test "Hex representation" <|
@@ -95,7 +109,7 @@ makeTest (TestCase input hex base64) =
             \_ ->
                 encoder
                     |> Encode.encode
-                    |> SHA1.hashBytesValue
+                    |> SHA1.fromBytes
                     |> SHA1.toHex
                     |> Expect.equal hex
         ]

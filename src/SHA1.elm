@@ -2,8 +2,8 @@ module SHA1 exposing
     ( Digest
     , fromString
     , toHex, toBase64
+    , fromByteValues
     , fromBytes, toBytes
-    , hashBytesValue
     )
 
 {-| [SHA-1] is a [cryptographic hash function].
@@ -62,30 +62,53 @@ import Hex
 -- TYPES
 
 
+{-| The code uses a 5-tuple of integers in several different ways. They are sometimes converted between, but we don't want to mix them up!
+
+On the other hand, the conversions are not really needed so we'd rather not pay the performance cost of that conversion.
+Enter phantom types; we distinguish the values at the type level, but they are the same value. Thus, the type checker will
+help us get the logic right, but there is no runtime cost.
+
+-}
+type DigestT a
+    = Digest Int Int Int Int Int
+
+
+type DigestS
+    = DigestS
+
+
+type StateS
+    = StateS
+
+
+type DeltaStateS
+    = DeltaStateS
+
+
 {-| A type to represent a message digest. `SHA1.Digest`s are equatable, and you may
 want to consider keeping any digests you need in your `Model` as `Digest`s, not
 as `String`s created by [`toHex`](#toHex) or [`toBase64`](#toBase64).
 -}
-type Digest
-    = Digest Int Int Int Int Int
+type alias Digest =
+    DigestT DigestS
 
 
-type alias State =
-    { h0 : Int
-    , h1 : Int
-    , h2 : Int
-    , h3 : Int
-    , h4 : Int
-    }
+type alias DigestState =
+    DigestT StateS
+
+
+createDigestState : Int -> Int -> Int -> Int -> Int -> DigestState
+createDigestState =
+    Digest
 
 
 type alias DeltaState =
-    { a : Int
-    , b : Int
-    , c : Int
-    , d : Int
-    , e : Int
-    }
+    DigestT DeltaStateS
+
+
+createDeltaState : Int -> Int -> Int -> Int -> Int -> DeltaState
+createDeltaState =
+    Digest
 
 
 
@@ -126,9 +149,19 @@ and 255 are discarded.
     --> "sVQuFckyE6K3fsdLmLHmq8+J738="
 
 -}
-fromBytes : List Int -> Digest
-fromBytes =
+fromByteValues : List Int -> Digest
+fromByteValues =
     hashBytesValue << Encode.encode << Encode.sequence << List.map Encode.unsignedInt8
+
+
+{-| Create a digest from `Bytes`
+
+This function is the most efficient of the three digest creation functions.
+
+-}
+fromBytes : Bytes -> Digest
+fromBytes =
+    hashBytesValue
 
 
 hashBytesValue : Bytes -> Digest
@@ -181,30 +214,126 @@ hashBytesValue bytes =
             finalDigest init
 
 
-finalDigest : State -> Digest
-finalDigest { h0, h1, h2, h3, h4 } =
+finalDigest : DigestState -> Digest
+finalDigest (Digest h0 h1 h2 h3 h4) =
     Digest h0 h1 h2 h3 h4
 
 
-reduceBytesMessage : State -> Decoder State
+reduceBytesMessage : DigestState -> Decoder DigestState
 reduceBytesMessage state =
-    array numberOfWords (Decode.unsignedInt32 BE)
-        |> Decode.map (addDeltas state)
+    Decode.succeed (addDeltas state)
+        |> andMap (Decode.unsignedInt32 BE)
+        |> andMap (Decode.unsignedInt32 BE)
+        |> andMap (Decode.unsignedInt32 BE)
+        |> andMap (Decode.unsignedInt32 BE)
+        |> andMap (Decode.unsignedInt32 BE)
+        |> andMap (Decode.unsignedInt32 BE)
+        |> andMap (Decode.unsignedInt32 BE)
+        |> andMap (Decode.unsignedInt32 BE)
+        |> andMap (Decode.unsignedInt32 BE)
+        |> andMap (Decode.unsignedInt32 BE)
+        |> andMap (Decode.unsignedInt32 BE)
+        |> andMap (Decode.unsignedInt32 BE)
+        |> andMap (Decode.unsignedInt32 BE)
+        |> andMap (Decode.unsignedInt32 BE)
+        |> andMap (Decode.unsignedInt32 BE)
+        |> andMap (Decode.unsignedInt32 BE)
 
 
-addDeltas : State -> Array Int -> State
-addDeltas state words =
+addDeltas state b16 b15 b14 b13 b12 b11 b10 b9 b8 b7 b6 b5 b4 b3 b2 b1 =
     let
-        { h0, h1, h2, h3, h4 } =
+        words =
+            [ b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11, b12, b13, b14, b15, b16 ]
+                |> Array.fromList
+
+        (Digest h0 h1 h2 h3 h4) =
             state
 
         initialDeltaState =
-            arrayIndexedFoldl calculateDigestDeltas (DeltaState h0 h1 h2 h3 h4) words
+            createDeltaState h0 h1 h2 h3 h4
+                |> calculateDigestDeltas 0 b1
+                |> calculateDigestDeltas 1 b2
+                |> calculateDigestDeltas 2 b3
+                |> calculateDigestDeltas 3 b4
+                |> calculateDigestDeltas 4 b5
+                |> calculateDigestDeltas 5 b6
+                |> calculateDigestDeltas 6 b7
+                |> calculateDigestDeltas 7 b8
+                |> calculateDigestDeltas 8 b9
+                |> calculateDigestDeltas 9 b10
+                |> calculateDigestDeltas 10 b11
+                |> calculateDigestDeltas 11 b12
+                |> calculateDigestDeltas 12 b13
+                |> calculateDigestDeltas 13 b14
+                |> calculateDigestDeltas 14 b15
+                |> calculateDigestDeltas 15 b16
 
-        { a, b, c, d, e } =
-            accumulateDeltas 0 words initialDeltaState
+        (Digest a b c d e) =
+            reduceWordsHelp 0 initialDeltaState b1 b2 b3 b4 b5 b6 b7 b8 b9 b10 b11 b12 b13 b14 b15 b16
     in
-    State (trim (h0 + a)) (trim (h1 + b)) (trim (h2 + c)) (trim (h3 + d)) (trim (h4 + e))
+    createDigestState (trim (h0 + a)) (trim (h1 + b)) (trim (h2 + c)) (trim (h3 + d)) (trim (h4 + e))
+
+
+andMap =
+    Decode.map2 (|>)
+
+
+
+{-
+   reduceBytesMessage : DigestState -> Decoder DigestState
+   reduceBytesMessage state =
+       Decode.succeed (addDeltas state)
+           |> andMap (Decode.unsignedInt32 BE)
+           |> andMap (Decode.unsignedInt32 BE)
+           |> andMap (Decode.unsignedInt32 BE)
+           |> andMap (Decode.unsignedInt32 BE)
+           |> andMap (Decode.unsignedInt32 BE)
+           |> andMap (Decode.unsignedInt32 BE)
+           |> andMap (Decode.unsignedInt32 BE)
+           |> andMap (Decode.unsignedInt32 BE)
+           |> andMap (Decode.unsignedInt32 BE)
+           |> andMap (Decode.unsignedInt32 BE)
+           |> andMap (Decode.unsignedInt32 BE)
+           |> andMap (Decode.unsignedInt32 BE)
+           |> andMap (Decode.unsignedInt32 BE)
+           |> andMap (Decode.unsignedInt32 BE)
+           |> andMap (Decode.unsignedInt32 BE)
+           |> andMap (Decode.unsignedInt32 BE)
+
+
+
+   -- addDeltas state b16 b15 b14 b13 b12 b11 b10 b9 b8 b7 b6 b5 b4 b3 b2 b1 =
+
+
+   addDeltas state b1 b2 b3 b4 b5 b6 b7 b8 b9 b10 b11 b12 b13 b14 b15 b16 =
+       let
+           (Digest h0 h1 h2 h3 h4) =
+               state
+
+           initialDeltaState =
+               createDeltaState h0 h1 h2 h3 h4
+                   |> calculateDigestDeltas 0 b16
+                   |> calculateDigestDeltas 1 b15
+                   |> calculateDigestDeltas 2 b14
+                   |> calculateDigestDeltas 3 b13
+                   |> calculateDigestDeltas 4 b12
+                   |> calculateDigestDeltas 5 b11
+                   |> calculateDigestDeltas 6 b10
+                   |> calculateDigestDeltas 7 b9
+                   |> calculateDigestDeltas 8 b8
+                   |> calculateDigestDeltas 9 b7
+                   |> calculateDigestDeltas 10 b6
+                   |> calculateDigestDeltas 11 b5
+                   |> calculateDigestDeltas 12 b4
+                   |> calculateDigestDeltas 13 b3
+                   |> calculateDigestDeltas 14 b2
+                   |> calculateDigestDeltas 15 b1
+
+           (Digest a b c d e) =
+               reduceWordsHelp 0 initialDeltaState b16 b15 b14 b13 b12 b11 b10 b9 b8 b7 b6 b5 b4 b3 b2 b1
+       in
+       createDigestState (trim (h0 + a)) (trim (h1 + b)) (trim (h2 + c)) (trim (h3 + d)) (trim (h4 + e))
+-}
 
 
 accumulateDeltas : Int -> Array Int -> DeltaState -> DeltaState
@@ -222,36 +351,68 @@ accumulateDeltas i state deltaState =
         deltaState
 
 
+reduceWordsHelp i deltaState b16 b15 b14 b13 b12 b11 b10 b9 b8 b7 b6 b5 b4 b3 b2 b1 =
+    if i < blockSize then
+        let
+            value =
+                b3
+                    |> Bitwise.xor b8
+                    |> Bitwise.xor b14
+                    |> Bitwise.xor b16
+                    |> rotateLeftBy 1
+        in
+        reduceWordsHelp (i + 1) (calculateDigestDeltas (i + numberOfWords) value deltaState) b15 b14 b13 b12 b11 b10 b9 b8 b7 b6 b5 b4 b3 b2 b1 value
+
+    else
+        deltaState
+
+
 calculateDigestDeltas : Int -> Int -> DeltaState -> DeltaState
-calculateDigestDeltas index int { a, b, c, d, e } =
+calculateDigestDeltas index int (Digest a b c d e) =
     let
-        ( f, k ) =
+        f =
             if index < 20 then
-                ( or (and b c) (and (trim (complement b)) d)
-                , 0x5A827999
-                )
+                or (and b c) (and (trim (complement b)) d)
 
             else if index < 40 then
-                ( Bitwise.xor b (Bitwise.xor c d)
-                , 0x6ED9EBA1
-                )
+                Bitwise.xor b (Bitwise.xor c d)
 
             else if index < 60 then
-                ( or (or (and b c) (and b d)) (and c d)
-                , 0x8F1BBCDC
-                )
+                or (or (and b c) (and b d)) (and c d)
 
             else
-                ( Bitwise.xor b (Bitwise.xor c d)
-                , 0xCA62C1D6
-                )
+                Bitwise.xor b (Bitwise.xor c d)
+
+        k =
+            if index < 20 then
+                0x5A827999
+
+            else if index < 40 then
+                0x6ED9EBA1
+
+            else if index < 60 then
+                0x8F1BBCDC
+
+            else
+                0xCA62C1D6
+
+        newA =
+            rotateLeftBy 5 a
+                |> (+) f
+                |> Bitwise.and 0xFFFFFFFF
+                |> (+) e
+                |> Bitwise.and 0xFFFFFFFF
+                |> (+) k
+                |> Bitwise.and 0xFFFFFFFF
+                |> (+) int
+                |> Bitwise.and 0xFFFFFFFF
     in
-    { a = trim (trim (trim (trim (rotateLeftBy 5 a + f) + e) + k) + int)
-    , b = a
-    , c = rotateLeftBy 30 b
-    , d = c
-    , e = d
-    }
+    createDeltaState
+        newA
+        a
+        (rotateLeftBy 30 b)
+        c
+        d
 
 
 trim : Int -> Int
@@ -263,8 +424,12 @@ reduceWords : Int -> Array Int -> Int
 reduceWords index words =
     let
         get i =
-            Array.get (index - i) words
-                |> Maybe.withDefault 0
+            case Array.get (index - i) words of
+                Nothing ->
+                    0
+
+                Just v ->
+                    v
 
         val =
             get 3
@@ -281,9 +446,9 @@ rotateLeftBy amount i =
     trim <| shiftRightZfBy (32 - amount) i + trim (shiftLeftBy amount i)
 
 
-init : State
+init : DigestState
 init =
-    State 0x67452301 0xEFCDAB89 0x98BADCFE 0x10325476 0xC3D2E1F0
+    createDigestState 0x67452301 0xEFCDAB89 0x98BADCFE 0x10325476 0xC3D2E1F0
 
 
 
