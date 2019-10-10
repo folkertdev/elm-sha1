@@ -219,33 +219,64 @@ finalDigest (Digest h0 h1 h2 h3 h4) =
     Digest h0 h1 h2 h3 h4
 
 
+map16 :
+    (b1 -> b2 -> b3 -> b4 -> b5 -> b6 -> b7 -> b8 -> b9 -> b10 -> b11 -> b12 -> b13 -> b14 -> b15 -> b16 -> result)
+    -> Decoder b1
+    -> Decoder b2
+    -> Decoder b3
+    -> Decoder b4
+    -> Decoder b5
+    -> Decoder b6
+    -> Decoder b7
+    -> Decoder b8
+    -> Decoder b9
+    -> Decoder b10
+    -> Decoder b11
+    -> Decoder b12
+    -> Decoder b13
+    -> Decoder b14
+    -> Decoder b15
+    -> Decoder b16
+    -> Decoder result
+map16 f b1 b2 b3 b4 b5 b6 b7 b8 b9 b10 b11 b12 b13 b14 b15 b16 =
+    Decode.map5 f b1 b2 b3 b4 b5
+        |> Decode.map5 (\a b c d g -> g a b c d) b6 b7 b8 b9
+        |> Decode.map5 (\a b c d g -> g a b c d) b10 b11 b12 b13
+        |> Decode.map4 (\a b c g -> g a b c) b14 b15 b16
+
+
+
+-- |> Decode.map5 (\a b c d e
+-- b6 b7 b8 b9 b10 b11 b12 b13 b14 b15 b16 =
+
+
 reduceBytesMessage : DigestState -> Decoder DigestState
 reduceBytesMessage state =
-    Decode.succeed (addDeltas state)
-        |> andMap (Decode.unsignedInt32 BE)
-        |> andMap (Decode.unsignedInt32 BE)
-        |> andMap (Decode.unsignedInt32 BE)
-        |> andMap (Decode.unsignedInt32 BE)
-        |> andMap (Decode.unsignedInt32 BE)
-        |> andMap (Decode.unsignedInt32 BE)
-        |> andMap (Decode.unsignedInt32 BE)
-        |> andMap (Decode.unsignedInt32 BE)
-        |> andMap (Decode.unsignedInt32 BE)
-        |> andMap (Decode.unsignedInt32 BE)
-        |> andMap (Decode.unsignedInt32 BE)
-        |> andMap (Decode.unsignedInt32 BE)
-        |> andMap (Decode.unsignedInt32 BE)
-        |> andMap (Decode.unsignedInt32 BE)
-        |> andMap (Decode.unsignedInt32 BE)
-        |> andMap (Decode.unsignedInt32 BE)
+    let
+        int32 =
+            Decode.unsignedInt32 BE
+    in
+    map16 (addDeltas state)
+        int32
+        int32
+        int32
+        int32
+        int32
+        int32
+        int32
+        int32
+        int32
+        int32
+        int32
+        int32
+        int32
+        int32
+        int32
+        int32
 
 
 addDeltas state b16 b15 b14 b13 b12 b11 b10 b9 b8 b7 b6 b5 b4 b3 b2 b1 =
     let
-        words =
-            [ b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11, b12, b13, b14, b15, b16 ]
-                |> Array.fromList
-
         (Digest h0 h1 h2 h3 h4) =
             state
 
@@ -278,64 +309,6 @@ andMap =
     Decode.map2 (|>)
 
 
-
-{-
-   reduceBytesMessage : DigestState -> Decoder DigestState
-   reduceBytesMessage state =
-       Decode.succeed (addDeltas state)
-           |> andMap (Decode.unsignedInt32 BE)
-           |> andMap (Decode.unsignedInt32 BE)
-           |> andMap (Decode.unsignedInt32 BE)
-           |> andMap (Decode.unsignedInt32 BE)
-           |> andMap (Decode.unsignedInt32 BE)
-           |> andMap (Decode.unsignedInt32 BE)
-           |> andMap (Decode.unsignedInt32 BE)
-           |> andMap (Decode.unsignedInt32 BE)
-           |> andMap (Decode.unsignedInt32 BE)
-           |> andMap (Decode.unsignedInt32 BE)
-           |> andMap (Decode.unsignedInt32 BE)
-           |> andMap (Decode.unsignedInt32 BE)
-           |> andMap (Decode.unsignedInt32 BE)
-           |> andMap (Decode.unsignedInt32 BE)
-           |> andMap (Decode.unsignedInt32 BE)
-           |> andMap (Decode.unsignedInt32 BE)
-
-
-
-   -- addDeltas state b16 b15 b14 b13 b12 b11 b10 b9 b8 b7 b6 b5 b4 b3 b2 b1 =
-
-
-   addDeltas state b1 b2 b3 b4 b5 b6 b7 b8 b9 b10 b11 b12 b13 b14 b15 b16 =
-       let
-           (Digest h0 h1 h2 h3 h4) =
-               state
-
-           initialDeltaState =
-               createDeltaState h0 h1 h2 h3 h4
-                   |> calculateDigestDeltas 0 b16
-                   |> calculateDigestDeltas 1 b15
-                   |> calculateDigestDeltas 2 b14
-                   |> calculateDigestDeltas 3 b13
-                   |> calculateDigestDeltas 4 b12
-                   |> calculateDigestDeltas 5 b11
-                   |> calculateDigestDeltas 6 b10
-                   |> calculateDigestDeltas 7 b9
-                   |> calculateDigestDeltas 8 b8
-                   |> calculateDigestDeltas 9 b7
-                   |> calculateDigestDeltas 10 b6
-                   |> calculateDigestDeltas 11 b5
-                   |> calculateDigestDeltas 12 b4
-                   |> calculateDigestDeltas 13 b3
-                   |> calculateDigestDeltas 14 b2
-                   |> calculateDigestDeltas 15 b1
-
-           (Digest a b c d e) =
-               reduceWordsHelp 0 initialDeltaState b16 b15 b14 b13 b12 b11 b10 b9 b8 b7 b6 b5 b4 b3 b2 b1
-       in
-       createDigestState (trim (h0 + a)) (trim (h1 + b)) (trim (h2 + c)) (trim (h3 + d)) (trim (h4 + e))
--}
-
-
 accumulateDeltas : Int -> Array Int -> DeltaState -> DeltaState
 accumulateDeltas i state deltaState =
     if i < blockSize then
@@ -352,7 +325,7 @@ accumulateDeltas i state deltaState =
 
 
 reduceWordsHelp i deltaState b16 b15 b14 b13 b12 b11 b10 b9 b8 b7 b6 b5 b4 b3 b2 b1 =
-    if i < blockSize then
+    if (i - blockSize) < 0 then
         let
             value =
                 b3
