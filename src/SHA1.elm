@@ -145,7 +145,7 @@ and 255 are discarded.
     SHA1.fromBytes [72, 105, 33, 32, 240, 159, 152, 132]
     --> SHA1.fromString "Hi! 😄"
 
-    [0x00, 0xFF, 0x34, 0xA5] |> SHA1.fromBytes |> SHA1.toBase64
+    [0x00, 0xFF, 0x34, 0xA5] |> SHA1.fromByteValues |> SHA1.toBase64
     --> "sVQuFckyE6K3fsdLmLHmq8+J738="
 
 -}
@@ -191,19 +191,11 @@ hashBytesValue bytes =
                     ]
                 )
 
-        decodeChunk ( n, state ) =
-            if n > 0 then
-                reduceBytesMessage state
-                    |> Decode.map (\new -> Loop ( n - 1, new ))
-
-            else
-                Decode.succeed (Done state)
-
         numberOfChunks =
             Bytes.width message // 64
 
         hashState =
-            Decode.loop ( numberOfChunks, init ) decodeChunk
+            iterate numberOfChunks reduceBytesMessage init
     in
     case Decode.decode hashState message of
         Just digest ->
@@ -219,62 +211,34 @@ finalDigest (Digest h0 h1 h2 h3 h4) =
     Digest h0 h1 h2 h3 h4
 
 
-map16 :
-    (b1 -> b2 -> b3 -> b4 -> b5 -> b6 -> b7 -> b8 -> b9 -> b10 -> b11 -> b12 -> b13 -> b14 -> b15 -> b16 -> result)
-    -> Decoder b1
-    -> Decoder b2
-    -> Decoder b3
-    -> Decoder b4
-    -> Decoder b5
-    -> Decoder b6
-    -> Decoder b7
-    -> Decoder b8
-    -> Decoder b9
-    -> Decoder b10
-    -> Decoder b11
-    -> Decoder b12
-    -> Decoder b13
-    -> Decoder b14
-    -> Decoder b15
-    -> Decoder b16
-    -> Decoder result
-map16 f b1 b2 b3 b4 b5 b6 b7 b8 b9 b10 b11 b12 b13 b14 b15 b16 =
-    Decode.map5 f b1 b2 b3 b4 b5
-        |> Decode.map5 (\a b c d g -> g a b c d) b6 b7 b8 b9
-        |> Decode.map5 (\a b c d g -> g a b c d) b10 b11 b12 b13
-        |> Decode.map4 (\a b c g -> g a b c) b14 b15 b16
+
+-- DECODING MESSAGES
 
 
-
--- |> Decode.map5 (\a b c d e
--- b6 b7 b8 b9 b10 b11 b12 b13 b14 b15 b16 =
+i32 : Decoder Int
+i32 =
+    Decode.unsignedInt32 BE
 
 
 reduceBytesMessage : DigestState -> Decoder DigestState
 reduceBytesMessage state =
-    let
-        int32 =
-            Decode.unsignedInt32 BE
-    in
-    map16 (addDeltas state)
-        int32
-        int32
-        int32
-        int32
-        int32
-        int32
-        int32
-        int32
-        int32
-        int32
-        int32
-        int32
-        int32
-        int32
-        int32
-        int32
+    map16 (addDeltas state) i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32
 
 
+{-| Here we have to commit some crimes to achieve the best performance.
+The most obvious is all those functions with 16 integer arguments.
+Previously, those were part of an array, which has some problems
+
+  - overhead of `get` and `push`
+  - memory use (effectively allocating 4 \* inputWidth)
+
+Only the latest 16 elements were used. So even though this all looks very ugly, it has a purpose!
+
+Next, definitions that previously used list operations (folds, maps) have been inlined.
+(e.g. `List.sum [1,2,3]` is much slower than `1 + 2 + 3`)
+This matters a lot in tight loops (but again the code doesn't look so nice).
+
+-}
 addDeltas state b16 b15 b14 b13 b12 b11 b10 b9 b8 b7 b6 b5 b4 b3 b2 b1 =
     let
         (Digest h0 h1 h2 h3 h4) =
@@ -305,25 +269,13 @@ addDeltas state b16 b15 b14 b13 b12 b11 b10 b9 b8 b7 b6 b5 b4 b3 b2 b1 =
     createDigestState (trim (h0 + a)) (trim (h1 + b)) (trim (h2 + c)) (trim (h3 + d)) (trim (h4 + e))
 
 
-andMap =
-    Decode.map2 (|>)
+{-| Fold over the words, keeping track of the deltas.
 
+We must keep track of the 16 most recent values, and use plain arguments for efficiency reasons.
+So in the recursion, `b16` is dropped, all the others shift one position to the left, and `value` is the final argument.
+Then the `deltaState` is also updated with the `value`.
 
-accumulateDeltas : Int -> Array Int -> DeltaState -> DeltaState
-accumulateDeltas i state deltaState =
-    if i < blockSize then
-        let
-            newElement =
-                reduceWords (i + numberOfWords) state
-        in
-        accumulateDeltas (i + 1)
-            (Array.push newElement state)
-            (calculateDigestDeltas (i + numberOfWords) newElement deltaState)
-
-    else
-        deltaState
-
-
+-}
 reduceWordsHelp i deltaState b16 b15 b14 b13 b12 b11 b10 b9 b8 b7 b6 b5 b4 b3 b2 b1 =
     if (i - blockSize) < 0 then
         let
@@ -342,6 +294,7 @@ reduceWordsHelp i deltaState b16 b15 b14 b13 b12 b11 b10 b9 b8 b7 b6 b5 b4 b3 b2
 
 calculateDigestDeltas : Int -> Int -> DeltaState -> DeltaState
 calculateDigestDeltas index int (Digest a b c d e) =
+    -- idea: inline this and the delta state into reduceWordsHelp
     let
         f =
             if index < 20 then
@@ -369,6 +322,9 @@ calculateDigestDeltas index int (Digest a b c d e) =
             else
                 0xCA62C1D6
 
+        -- Q: where does this come from? are those masks really needed?
+        -- can the (+) be replaced with Bitwise.or somehow?
+        -- this is apparently where most time is spent
         newA =
             rotateLeftBy 5 a
                 |> (+) f
@@ -391,27 +347,6 @@ calculateDigestDeltas index int (Digest a b c d e) =
 trim : Int -> Int
 trim =
     and 0xFFFFFFFF
-
-
-reduceWords : Int -> Array Int -> Int
-reduceWords index words =
-    let
-        get i =
-            case Array.get (index - i) words of
-                Nothing ->
-                    0
-
-                Just v ->
-                    v
-
-        val =
-            get 3
-                |> Bitwise.xor (get 8)
-                |> Bitwise.xor (get 14)
-                |> Bitwise.xor (get 16)
-                |> rotateLeftBy 1
-    in
-    val
 
 
 rotateLeftBy : Int -> Int -> Int
@@ -545,25 +480,48 @@ base64Chars =
 -- HELPERS
 
 
-array : Int -> Decoder a -> Decoder (Array a)
-array n decoder =
-    Decode.loop ( n, Array.empty ) (arrayHelp decoder)
+{-| The most efficient implmenentation for `map16`, given that `Decode.map5` is the highest defined in Kernel code
+-}
+map16 :
+    (b1 -> b2 -> b3 -> b4 -> b5 -> b6 -> b7 -> b8 -> b9 -> b10 -> b11 -> b12 -> b13 -> b14 -> b15 -> b16 -> result)
+    -> Decoder b1
+    -> Decoder b2
+    -> Decoder b3
+    -> Decoder b4
+    -> Decoder b5
+    -> Decoder b6
+    -> Decoder b7
+    -> Decoder b8
+    -> Decoder b9
+    -> Decoder b10
+    -> Decoder b11
+    -> Decoder b12
+    -> Decoder b13
+    -> Decoder b14
+    -> Decoder b15
+    -> Decoder b16
+    -> Decoder result
+map16 f b1 b2 b3 b4 b5 b6 b7 b8 b9 b10 b11 b12 b13 b14 b15 b16 =
+    Decode.succeed f
+        |> Decode.map5 (\a b c d e -> e d c b a) b4 b3 b2 b1
+        |> Decode.map5 (\a b c d e -> e d c b a) b8 b7 b6 b5
+        |> Decode.map5 (\a b c d e -> e d c b a) b12 b11 b10 b9
+        |> Decode.map5 (\a b c d e -> e d c b a) b16 b15 b14 b13
 
 
-arrayHelp decoder ( i, accum ) =
-    if i > 0 then
-        decoder
-            |> Decode.map (\newValue -> Loop ( i - 1, Array.push newValue accum ))
+{-| Iterate a decoder `n` times
+
+Needs some care to not run into stack overflow. This definition is nicely tail-recursive.
+
+-}
+iterate : Int -> (a -> Decoder a) -> a -> Decoder a
+iterate n step initial =
+    iterateHelp n (\value -> Decode.andThen step value) (Decode.succeed initial)
+
+
+iterateHelp n step initial =
+    if n > 0 then
+        iterateHelp (n - 1) step (step initial)
 
     else
-        Decode.succeed (Done accum)
-
-
-arrayIndexedFoldl : (Int -> a -> b -> b) -> b -> Array a -> b
-arrayIndexedFoldl step initial arr =
-    let
-        folder element ( i, state ) =
-            ( i + 1, step i element state )
-    in
-    Array.foldl folder ( 0, initial ) arr
-        |> Tuple.second
+        initial

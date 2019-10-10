@@ -16,7 +16,7 @@ fox =
 
 
 input =
-    warAndPeace
+    kb
 
 
 inputBytes =
@@ -29,6 +29,10 @@ suite =
         [ Benchmark.benchmark "bytes"
             (\_ -> SHA1.fromBytes inputBytes)
         ]
+
+
+kb =
+    String.slice 0 999 warAndPeace
 
 
 warAndPeace =
